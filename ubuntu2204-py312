@@ -38,14 +38,12 @@ RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.s
     /opt/miniconda3/bin/conda config --set show_channel_urls yes
 
 # 配置 pip 清华源
-# 注意：在 Docker 构建中，用户家目录可能是 /root
 RUN mkdir -p /root/.pip && \
     printf "[global]\nindex-url = https://pypi.tuna.tsinghua.edu.cn/simple\ntrusted-host = pypi.tuna.tsinghua.edu.cn\n" > /root/.pip/pip.conf
 
 # 安装python3.12
 RUN /opt/miniconda3/bin/conda create -y -n python3.12 python=3.12 
-# 更改.bashrc 默认启动python3.12
-RUN echo "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate python3.12" >> /root/.bashrc
+
 # 安装 Node.js（JupyterLab 插件构建用）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -55,6 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 安装 JupyterLab 4.4.4 到 base 环境
 RUN /opt/miniconda3/bin/conda install -y jupyterlab=4.4.4
+
 # 安装 pip 依赖（后端）
 RUN /opt/miniconda3/bin/pip install \
     jupyterlab-lsp \
@@ -66,15 +65,54 @@ RUN /opt/miniconda3/bin/pip install \
 # 安装 JupyterLab 插件（前端）
 RUN /opt/miniconda3/bin/jupyter labextension install \
     @jupyterlab/toc \
-    @jupyterlab/htmlviewer
+    @jupyterlab/katex-extension \
+    jupyter-matplotlib \
+    @jupyterlab/debugger \
+    @jupyterlab/lsp-extension && \
+    /opt/miniconda3/bin/jupyter lab build
 
-# 安装 LaTeX 支持（可选）
+# 安装 LaTeX 支持
 RUN apt-get update && apt-get install -y --no-install-recommends \
     texlive-xetex \
     texlive-fonts-recommended \
     texlive-latex-recommended \
     texlive-latex-extra \
     && rm -rf /var/lib/apt/lists/*
+
+# 安装 screen
+RUN apt-get update && apt-get install -y screen && rm -rf /var/lib/apt/lists/*
+
+# 安装 code-server（VSCode Server）- 使用更可靠的安装方式
+RUN apt-get update && apt-get install -y curl && \
+    curl -fsSL https://code-server.dev/install.sh | sh && \
+    # 如果官方安装失败，尝试备用方案
+    (which code-server || (wget -O /tmp/code-server.deb https://github.com/coder/code-server/releases/download/v4.19.1/code-server_4.19.1_amd64.deb && \
+     dpkg -i /tmp/code-server.deb && \
+     rm /tmp/code-server.deb)) && \
+    # 确保code-server可执行（code-server安装在/usr/bin/）
+    chmod +x /usr/bin/code-server && \
+    rm -rf /var/lib/apt/lists/*
+
+# 安装VSCode扩展（在构建阶段完成，避免运行时阻塞）
+RUN code-server --install-extension ms-python.python || true
+RUN code-server --install-extension ms-toolsai.jupyter || true
+RUN code-server --install-extension ms-python.pylance || true
+RUN code-server --install-extension ms-python.debugpy || true
+
+# 配置 bashrc（root/ubuntu）自动激活 conda 环境
+RUN echo "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate python3.12" >> /root/.bashrc && \
+    echo "conda activate python3.12" >> /root/.bashrc
+
+# 配置 JupyterLab 默认 shell 为 bash
+RUN mkdir -p /root/.jupyter && \
+    echo "c.NotebookApp.terminado_settings = {'shell_command': ['/bin/bash']}" >> /root/.jupyter/jupyter_notebook_config.py && \
+    echo "c.ServerApp.terminado_settings = {'shell_command': ['/bin/bash']}" >> /root/.jupyter/jupyter_notebook_config.py && \
+    echo "c.ServerApp.root_dir = '/workspace'" >> /root/.jupyter/jupyter_notebook_config.py && \
+    echo "c.ServerApp.allow_origin = '*'" >> /root/.jupyter/jupyter_notebook_config.py && \
+    echo "c.ServerApp.ip = '0.0.0.0'" >> /root/.jupyter/jupyter_notebook_config.py
+
+# pip/conda 换源对所有用户生效
+RUN mkdir -p /etc/skel/.pip && cp /root/.pip/pip.conf /etc/skel/.pip/pip.conf
 
 # 将构建上下文复制到镜像中，以规避潜在的文件系统问题
 WORKDIR /app
@@ -102,8 +140,9 @@ RUN mkdir -p /var/run/sshd && \
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
     sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
-# 创建 supervisord 日志目录
-RUN mkdir -p /var/log/supervisor /var/run
+# 创建 supervisord 日志目录和工作目录
+RUN mkdir -p /var/log/supervisor /var/run /workspace && \
+    chmod 755 /workspace
 
 # 设置环境变量
 ARG SSH_PASSWORD=123456
@@ -116,7 +155,7 @@ ENV SSH_PASSWORD=${SSH_PASSWORD} \
     LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:$LD_LIBRARY_PATH
 
 # 暴露端口
-EXPOSE 22 8081 8888
+EXPOSE 22 62661 8888
 
 # 启动命令
 CMD ["/init/init.sh"]
